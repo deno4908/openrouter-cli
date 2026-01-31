@@ -715,6 +715,7 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   screen.append(statusBar);
 
   // On Termux, focus inputBox immediately to trigger keyboard
+  // and set mode to 'insert' to prevent screen.key handlers from intercepting
   if (isTermux) {
     inputBox.focus();
     inputBox.readInput();
@@ -728,7 +729,8 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
     }, 0);
   });
 
-  let mode: 'normal' | 'insert' = 'normal';
+  // On Termux, start in insert mode since inputBox is already focused
+  let mode: 'normal' | 'insert' = isTermux ? 'insert' : 'normal';
   let editorOpen = false; // Track when editor is open
   let attachedFile: string | null = null; // Attached file content
   let attachedFileName: string | null = null; // Attached file name
