@@ -714,12 +714,8 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   screen.append(inputBox);
   screen.append(statusBar);
 
-  // On Termux, focus inputBox immediately to trigger keyboard
-  // and set mode to 'insert' to prevent screen.key handlers from intercepting
-  if (isTermux) {
-    inputBox.focus();
-    inputBox.readInput();
-  }
+  // On Termux, don't auto-focus inputBox - let blessed handle focus normally
+  // User can still use the app, and tapping inputBox area will focus it
 
   // Re-render on every keypress to show typed text and fix cursor position
   inputBox.on('keypress', () => {
@@ -729,8 +725,8 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
     }, 0);
   });
 
-  // On Termux, start in insert mode since inputBox is already focused
-  let mode: 'normal' | 'insert' = isTermux ? 'insert' : 'normal';
+  // Mode is always normal at start - user presses 'i' to enter insert mode
+  let mode: 'normal' | 'insert' = 'normal';
   let editorOpen = false; // Track when editor is open
   let attachedFile: string | null = null; // Attached file content
   let attachedFileName: string | null = null; // Attached file name
@@ -1070,10 +1066,6 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   let activeWsKeyHandler: any = null; // Reference for cleanup
 
   screen.key(['i'], () => {
-    // On Termux, inputBox is always focused so skip this handler
-    // to prevent double character input
-    if (isTermux) return;
-
     if (mode === 'normal' && !editorOpen) {
       mode = 'insert';
       inputBox.focus();
@@ -1116,20 +1108,14 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   screen.key(['escape'], () => {
     if (mode === 'insert') {
       mode = 'normal';
-      // On Termux, keep inputBox focused to keep keyboard open
-      if (!isTermux) {
-        chatBox.focus();
-      }
+      chatBox.focus();
       updateStatus();
     }
   });
 
   inputBox.key(['escape'], () => {
     mode = 'normal';
-    // On Termux, keep inputBox focused to keep keyboard open
-    if (!isTermux) {
-      chatBox.focus();
-    }
+    chatBox.focus();
     updateStatus();
   });
 
