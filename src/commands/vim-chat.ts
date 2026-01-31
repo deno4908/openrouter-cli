@@ -1068,6 +1068,10 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   let activeWsKeyHandler: any = null; // Reference for cleanup
 
   screen.key(['i'], () => {
+    // On Termux, inputBox is always focused so skip this handler
+    // to prevent double character input
+    if (isTermux) return;
+
     if (mode === 'normal' && !editorOpen) {
       mode = 'insert';
       inputBox.focus();
@@ -1120,7 +1124,10 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
   inputBox.key(['escape'], () => {
     mode = 'normal';
-    chatBox.focus();
+    // On Termux, keep inputBox focused to keep keyboard open
+    if (!isTermux) {
+      chatBox.focus();
+    }
     updateStatus();
   });
 
