@@ -27,6 +27,11 @@ export async function editorCommand(options: { file?: string }) {
         title: 'Editor'
     });
 
+    // Detect Termux (Android terminal) to keep keyboard open
+    const isTermux = process.env.TERMUX_VERSION !== undefined ||
+        process.env.PREFIX?.includes('com.termux') ||
+        process.platform === 'android';
+
     const state: EditorState = {
         content: [''],
         cursorRow: 0,

@@ -112,6 +112,11 @@ export async function splitChatCommand(options: { model?: string, conversation?:
         title: 'Split Chat + Editor'
     });
 
+    // Detect Termux (Android terminal) to keep keyboard open
+    const isTermux = process.env.TERMUX_VERSION !== undefined ||
+        process.env.PREFIX?.includes('com.termux') ||
+        process.platform === 'android';
+
     // ===== LEFT PANEL: CHAT =====
     const chatBox = blessed.box({
         top: 0,

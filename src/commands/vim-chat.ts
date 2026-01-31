@@ -579,6 +579,11 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
     fullUnicode: true  // Support Vietnamese characters
   });
 
+  // Detect Termux (Android terminal) to keep keyboard open
+  const isTermux = process.env.TERMUX_VERSION !== undefined ||
+    process.env.PREFIX?.includes('com.termux') ||
+    process.platform === 'android';
+
   const chatBox = blessed.box({
     top: 0,
     left: 0,
@@ -968,7 +973,10 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   screen.key(['escape'], () => {
     if (mode === 'insert') {
       mode = 'normal';
-      chatBox.focus();
+      // On Termux, keep inputBox focused to keep keyboard open
+      if (!isTermux) {
+        chatBox.focus();
+      }
       updateStatus();
     }
   });
