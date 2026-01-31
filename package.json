@@ -1,6 +1,6 @@
 {
   "name": "deno-openrouter-cli",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Beautiful CLI for OpenRouter API with full features - Vim-style chat, split view editor, terminal, and more",
   "main": "dist/index.js",
   "bin": {
