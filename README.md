@@ -122,9 +122,6 @@ On first run, you'll be prompted to add your API key(s).
 | `or config show` | View current configuration |
 | `or config set-key <key>` | Set API key |
 | `or config set-model <id>` | Set default model |
-| `or history list` | View conversation history |
-| `or history show <id>` | View specific conversation |
-| `or history clear` | Clear all history |
 
 ---
 
