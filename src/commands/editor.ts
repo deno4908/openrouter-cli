@@ -88,6 +88,20 @@ export async function editorCommand(options: { file?: string }) {
     screen.append(statusBar);
     screen.append(cmdLine);
 
+    // On Termux, create hidden input to trigger and keep keyboard open
+    if (isTermux) {
+        const hiddenInput = blessed.textbox({
+            top: -1,
+            left: 0,
+            width: 1,
+            height: 1,
+            inputOnFocus: true
+        });
+        screen.append(hiddenInput);
+        hiddenInput.focus();
+        hiddenInput.readInput();
+    }
+
     const visibleLines = () => Math.floor((screen.height as number) - 3);
 
     const updateStatus = () => {

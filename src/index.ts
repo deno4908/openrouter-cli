@@ -34,6 +34,7 @@ program
   .command('chat')
   .description('Chat với Vim keybindings (j/k scroll, i insert, ESC normal)')
   .option('-m, --model <model>', 'Chọn model')
+  .option('-t, --termux', 'Force Termux mode (keeps keyboard open)')
   .action(vimChatCommand);
 
 program

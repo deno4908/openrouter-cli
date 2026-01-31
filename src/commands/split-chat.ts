@@ -63,31 +63,38 @@ function selectModelSync(screen: blessed.Widgets.Screen, models: FreeModel[], cu
 
         let done = false;
 
-        const handleJ = () => { if (!done) { selectedIndex = Math.min(selectedIndex + 1, models.length - 1); renderList(); } };
-        const handleK = () => { if (!done) { selectedIndex = Math.max(selectedIndex - 1, 0); renderList(); } };
-        const handleEnter = () => { if (!done) finish(models[selectedIndex].id); };
-        const handleEscape = () => { if (!done) finish(currentModel); };
+        // Use overlay.key instead of screen.key to prevent propagation to main handlers
+        overlay.key(['j', 'down'], () => {
+            if (!done) {
+                selectedIndex = Math.min(selectedIndex + 1, models.length - 1);
+                renderList();
+            }
+        });
 
-        function finish(result: string) {
-            if (done) return;
-            done = true;
-            screen.unkey('j', handleJ);
-            screen.unkey('k', handleK);
-            screen.unkey('down', handleJ);
-            screen.unkey('up', handleK);
-            screen.unkey('enter', handleEnter);
-            screen.unkey('escape', handleEscape);
-            screen.remove(overlay);
-            screen.render();
-            resolve(result);
-        }
+        overlay.key(['k', 'up'], () => {
+            if (!done) {
+                selectedIndex = Math.max(selectedIndex - 1, 0);
+                renderList();
+            }
+        });
 
-        screen.key('j', handleJ);
-        screen.key('k', handleK);
-        screen.key('down', handleJ);
-        screen.key('up', handleK);
-        screen.key('enter', handleEnter);
-        screen.key('escape', handleEscape);
+        overlay.key(['enter'], () => {
+            if (!done) {
+                done = true;
+                screen.remove(overlay);
+                screen.render();
+                resolve(models[selectedIndex].id);
+            }
+        });
+
+        overlay.key(['escape'], () => {
+            if (!done) {
+                done = true;
+                screen.remove(overlay);
+                screen.render();
+                resolve(currentModel);
+            }
+        });
     });
 }
 
@@ -175,6 +182,9 @@ export async function splitChatCommand(options: { model?: string, conversation?:
 
     let chatContent = '';
     let chatMode: 'normal' | 'insert' = 'normal';
+    let overlayOpen = false; // Track when model selector or other overlay is open
+    let attachedFile: string | null = null; // Attached file content
+    let attachedFileName: string | null = null; // Attached file name
 
     // Build chat content from existing messages
     if (options.conversation) {
@@ -330,19 +340,96 @@ export async function splitChatCommand(options: { model?: string, conversation?:
         chatBox.setScrollPerc(100);
     };
 
+    const CHUNK_SIZE = 4000; // 4K characters per chunk
+
     const sendMessage = async (isRegenerate: boolean = false) => {
         if (!isRegenerate) {
             const message = chatInputBox.getValue().trim();
             if (!message) return;
 
             chatInputBox.setValue('');
-            addMessage('user', message);
 
-            conversation.messages.push({
-                role: 'user',
-                content: message,
-                timestamp: Date.now()
-            });
+            // Handle large attached files - split into chunks
+            if (attachedFile && attachedFileName) {
+                const ext = attachedFileName.split('.').pop() || 'txt';
+                const fileContent = attachedFile;
+                const totalLength = fileContent.length;
+
+                if (totalLength > CHUNK_SIZE) {
+                    const totalChunks = Math.ceil(totalLength / CHUNK_SIZE);
+
+                    addMessage('user', `[Attaching: ${attachedFileName} (${totalChunks} chunks)]`);
+                    chatContent += `{yellow-fg}[Sending large file in ${totalChunks} chunks...]{/yellow-fg}\n\n`;
+                    chatBox.setContent(chatContent);
+                    screen.render();
+
+                    for (let i = 0; i < totalChunks; i++) {
+                        const start = i * CHUNK_SIZE;
+                        const chunkContent = fileContent.slice(start, start + CHUNK_SIZE);
+                        const chunkMessage = `[File: ${attachedFileName}] [Chunk ${i + 1}/${totalChunks}]\n\`\`\`${ext}\n${chunkContent}\n\`\`\`\n${i === totalChunks - 1 ? `\nUser message: ${message}` : '\n(Continue...)'}`;
+
+                        updateStatus();
+                        conversation.messages.push({ role: 'user', content: chunkMessage, timestamp: Date.now() });
+
+                        if (i < totalChunks - 1) {
+                            try {
+                                const apiMsgs: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
+                                apiMsgs.push({ role: 'system', content: 'IMPORTANT: Never use emojis. Respond briefly: Received chunk X/Y' });
+                                apiMsgs.push({ role: 'user', content: chunkMessage });
+                                let ack = '';
+                                for await (const c of openRouterAPI.chatStream(apiMsgs, conversation.model)) { ack += c; }
+                                conversation.messages.push({ role: 'assistant', content: ack || `Received ${i + 1}/${totalChunks}`, timestamp: Date.now() });
+                            } catch (e) { }
+                        }
+                    }
+
+                    attachedFile = null;
+                    attachedFileName = null;
+
+                    try {
+                        let response = '';
+                        chatContent += '{cyan-fg}AI: ';
+                        chatBox.setContent(chatContent + '...{/cyan-fg}');
+                        screen.render();
+
+                        const apiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
+                        if (conversation.systemPrompt) apiMessages.push({ role: 'system', content: conversation.systemPrompt });
+                        apiMessages.push(...conversation.messages.map(m => ({ role: m.role, content: m.content })));
+
+                        for await (const chunk of openRouterAPI.chatStream(apiMessages, conversation.model)) {
+                            response += chunk;
+                            chatBox.setContent(chatContent + response + '{/cyan-fg}');
+                            chatBox.setScrollPerc(100);
+                            screen.render();
+                        }
+
+                        if (!response) response = '(No response)';
+                        chatContent += response + `{/cyan-fg}\n\n`;
+                        conversation.messages.push({ role: 'assistant', content: response, timestamp: Date.now() });
+                        conversation.updatedAt = Date.now();
+                        configStore.saveConversation(conversation);
+                    } catch (error: any) {
+                        chatContent += `{red-fg}Error: ${error.message}{/red-fg}\n\n`;
+                    }
+
+                    chatBox.setContent(chatContent);
+                    updateStatus();
+                    screen.render();
+                    return;
+                }
+            }
+
+            // Normal message or small file
+            let fullMessage = message;
+            if (attachedFile && attachedFileName) {
+                const ext = attachedFileName.split('.').pop() || 'txt';
+                fullMessage = `[File: ${attachedFileName}]\n\`\`\`${ext}\n${attachedFile}\n\`\`\`\n\nUser message: ${message}`;
+                attachedFile = null;
+                attachedFileName = null;
+            }
+
+            addMessage('user', message);
+            conversation.messages.push({ role: 'user', content: fullMessage, timestamp: Date.now() });
 
             if (conversation.messages.length === 1) {
                 conversation.title = message.slice(0, 50);
@@ -356,6 +443,9 @@ export async function splitChatCommand(options: { model?: string, conversation?:
             screen.render();
 
             const apiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
+
+            // Anti-emoji prompt
+            apiMessages.push({ role: 'system', content: 'CRITICAL RULE: You MUST NOT use any emojis, emoticons, icons, or special unicode symbols in your responses. Use only plain ASCII text.' });
 
             if (conversation.systemPrompt) {
                 apiMessages.push({ role: 'system', content: conversation.systemPrompt });
@@ -463,10 +553,16 @@ export async function splitChatCommand(options: { model?: string, conversation?:
     screen.append(editorStatus);
     screen.append(statusBar);
 
+    // On Termux, focus chatInputBox immediately to trigger keyboard
+    if (isTermux) {
+        chatInputBox.focus();
+        chatInputBox.readInput();
+    }
+
     updateBorders();
     updateStatus();
     renderEditor();
-    chatBox.focus();
+    if (!isTermux) chatBox.focus();
 
     // ===== KEY BINDINGS =====
 
@@ -503,8 +599,10 @@ export async function splitChatCommand(options: { model?: string, conversation?:
     // m to switch model (only in normal mode)
     screen.key(['m'], async () => {
         if (chatMode === 'normal' && editorMode === 'normal') {
+            overlayOpen = true; // Prevent scroll while model selector is open
             const previousModel = conversation.model;
             conversation.model = await selectModelSync(screen, models, previousModel);
+            overlayOpen = false;
             if (conversation.model !== previousModel) {
                 const modelName = models.find(m => m.id === conversation.model)?.name || conversation.model;
                 chatContent += `[Model changed to: ${modelName}]\n\n`;
@@ -609,6 +707,7 @@ export async function splitChatCommand(options: { model?: string, conversation?:
 
     // Navigation j/k
     screen.key(['j'], () => {
+        if (overlayOpen) return; // Don't scroll when overlay is open
         if (activePanel === 'chat' && chatMode === 'normal') {
             chatBox.scroll(1);
             screen.render();
@@ -622,6 +721,7 @@ export async function splitChatCommand(options: { model?: string, conversation?:
     });
 
     screen.key(['k'], () => {
+        if (overlayOpen) return; // Don't scroll when overlay is open
         if (activePanel === 'chat' && chatMode === 'normal') {
             chatBox.scroll(-1);
             screen.render();
@@ -650,6 +750,7 @@ export async function splitChatCommand(options: { model?: string, conversation?:
 
     // Arrow key navigation (same as j/k/h/l)
     screen.key(['down'], () => {
+        if (overlayOpen) return; // Don't scroll when overlay is open
         if (activePanel === 'chat' && chatMode === 'normal') {
             chatBox.scroll(1);
             screen.render();
@@ -663,6 +764,7 @@ export async function splitChatCommand(options: { model?: string, conversation?:
     });
 
     screen.key(['up'], () => {
+        if (overlayOpen) return; // Don't scroll when overlay is open
         if (activePanel === 'chat' && chatMode === 'normal') {
             chatBox.scroll(-1);
             screen.render();
@@ -914,6 +1016,82 @@ export async function splitChatCommand(options: { model?: string, conversation?:
 
             showDirBrowser();
         });
+    });
+
+    // Ctrl+F to attach file
+    screen.key(['C-f'], () => {
+        if (activePanel !== 'chat' || chatMode !== 'normal') return;
+
+        let currentDir = process.cwd();
+        const fileList = blessed.box({
+            top: 'center',
+            left: 'center',
+            width: '70%',
+            height: '60%',
+            label: ` Attach File (j/k=nav, Enter=select, ESC=cancel) `,
+            border: { type: 'line' },
+            style: { border: { fg: 'green' }, bg: 'black' },
+            scrollable: true,
+            tags: true
+        });
+
+        let items: { name: string; isDir: boolean; fullPath: string }[] = [];
+        let selectedIndex = 0;
+
+        const loadDir = (dir: string) => {
+            currentDir = dir;
+            items = [];
+            selectedIndex = 0;
+            try {
+                const parent = path.dirname(dir);
+                if (parent !== dir) items.push({ name: '..', isDir: true, fullPath: parent });
+                const allFiles = fs.readdirSync(dir);
+                const dirs = allFiles.filter(f => { try { return fs.statSync(path.join(dir, f)).isDirectory() && !f.startsWith('.'); } catch { return false; } });
+                const files = allFiles.filter(f => { try { return fs.statSync(path.join(dir, f)).isFile() && !f.startsWith('.'); } catch { return false; } });
+                dirs.sort().forEach(d => items.push({ name: d, isDir: true, fullPath: path.join(dir, d) }));
+                files.sort().forEach(f => items.push({ name: f, isDir: false, fullPath: path.join(dir, f) }));
+            } catch (e) { }
+            renderFileList();
+        };
+
+        const renderFileList = () => {
+            let content = '';
+            items.forEach((item, i) => {
+                const prefix = i === selectedIndex ? '{cyan-bg}{black-fg}> ' : '  ';
+                const suffix = i === selectedIndex ? ' {/black-fg}{/cyan-bg}' : '';
+                const icon = item.isDir ? '{yellow-fg}[DIR]{/yellow-fg} ' : '{green-fg}[FILE]{/green-fg} ';
+                content += `${prefix}${icon}${item.name}${suffix}\n`;
+            });
+            fileList.setContent(content);
+            fileList.setLabel(` ${currentDir} `);
+            screen.render();
+        };
+
+        screen.append(fileList);
+        fileList.focus();
+        loadDir(currentDir);
+
+        fileList.key(['j', 'down'], () => { selectedIndex = Math.min(selectedIndex + 1, items.length - 1); renderFileList(); });
+        fileList.key(['k', 'up'], () => { selectedIndex = Math.max(selectedIndex - 1, 0); renderFileList(); });
+        fileList.key(['enter'], () => {
+            const item = items[selectedIndex];
+            if (!item) return;
+            if (item.isDir) {
+                loadDir(item.fullPath);
+            } else {
+                try {
+                    attachedFile = fs.readFileSync(item.fullPath, 'utf-8');
+                    attachedFileName = item.name;
+                    chatContent += `{yellow-fg}[Attached: ${item.name} (${attachedFile.length} chars)]{/yellow-fg}\n\n`;
+                    chatBox.setContent(chatContent);
+                    chatBox.setScrollPerc(100);
+                } catch (e) { }
+                screen.remove(fileList);
+                chatBox.focus();
+                screen.render();
+            }
+        });
+        fileList.key(['escape', 'q'], () => { screen.remove(fileList); chatBox.focus(); screen.render(); });
     });
 
     // Go back to chatbox mode (Ctrl+B)

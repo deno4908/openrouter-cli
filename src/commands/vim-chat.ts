@@ -526,7 +526,7 @@ async function selectConversation(): Promise<Conversation | null> {
   });
 }
 
-export async function vimChatCommand(options: { model?: string, conversation?: Conversation }) {
+export async function vimChatCommand(options: { model?: string, conversation?: Conversation, termux?: boolean }) {
   // Clear console
   console.clear();
 
@@ -565,7 +565,7 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
         id: Date.now().toString(),
         title: 'New Chat',
         model,
-        systemPrompt: configStore.getDefaultSystemPrompt(),
+        systemPrompt: '', // Reset to empty for new conversation
         messages: [],
         createdAt: Date.now(),
         updatedAt: Date.now()
@@ -579,8 +579,9 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
     fullUnicode: true  // Support Vietnamese characters
   });
 
-  // Detect Termux (Android terminal) to keep keyboard open
-  const isTermux = process.env.TERMUX_VERSION !== undefined ||
+  // Detect Termux (Android terminal) or forced via --termux flag
+  const isTermux = options.termux === true ||
+    process.env.TERMUX_VERSION !== undefined ||
     process.env.PREFIX?.includes('com.termux') ||
     process.platform === 'android';
 
@@ -713,6 +714,12 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
   screen.append(inputBox);
   screen.append(statusBar);
 
+  // On Termux, focus inputBox immediately to trigger keyboard
+  if (isTermux) {
+    inputBox.focus();
+    inputBox.readInput();
+  }
+
   // Re-render on every keypress to show typed text and fix cursor position
   inputBox.on('keypress', () => {
     // Use setTimeout to ensure cursor position is updated after the key is processed
@@ -787,7 +794,124 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
     inputBox.setValue('');
 
-    // Include attached file with message if present
+    const CHUNK_SIZE = 4000; // 4K characters per chunk
+
+    // Handle large attached files - split into chunks
+    if (attachedFile && attachedFileName) {
+      const ext = attachedFileName.split('.').pop() || 'txt';
+      const fileContent = attachedFile;
+      const totalLength = fileContent.length;
+
+      if (totalLength > CHUNK_SIZE) {
+        // Large file - split into chunks
+        const totalChunks = Math.ceil(totalLength / CHUNK_SIZE);
+
+        // Show single notification
+        addMessage('user', `[Attaching: ${attachedFileName} (${totalChunks} chunks)]`);
+        chatContent += `{yellow-fg}[Sending large file in ${totalChunks} chunks...]{/yellow-fg}\n\n`;
+        chatBox.setContent(chatContent);
+        chatBox.setScrollPerc(100);
+        screen.render();
+
+        // Send each chunk
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const chunkContent = fileContent.slice(start, start + CHUNK_SIZE);
+          const chunkMessage = `[File: ${attachedFileName}] [Chunk ${i + 1}/${totalChunks}]\n\`\`\`${ext}\n${chunkContent}\n\`\`\`\n${i === totalChunks - 1 ? `\nUser message: ${message}` : '\n(Continue sending next chunk...)'}`;
+
+          // Update status
+          statusBar.setContent(`Sending chunk ${i + 1}/${totalChunks}...`);
+          screen.render();
+
+          conversation.messages.push({
+            role: 'user',
+            content: chunkMessage,
+            timestamp: Date.now()
+          });
+
+          // For first chunks, just send without waiting for response
+          if (i < totalChunks - 1) {
+            // Send chunk silently, AI will just acknowledge
+            try {
+              const apiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
+              apiMessages.push({ role: 'system', content: 'IMPORTANT: Never use emojis, icons, emoticons, or special symbols. User is sending a large file in chunks. Just respond "Received chunk X/Y" briefly.' });
+              if (conversation.systemPrompt) {
+                apiMessages.push({ role: 'system', content: conversation.systemPrompt });
+              }
+              apiMessages.push({ role: 'user', content: chunkMessage });
+
+              let ack = '';
+              for await (const chunk of openRouterAPI.chatStream(apiMessages, model)) {
+                ack += chunk;
+              }
+              conversation.messages.push({
+                role: 'assistant',
+                content: ack || `Received chunk ${i + 1}/${totalChunks}`,
+                timestamp: Date.now()
+              });
+            } catch (e) {
+              // Continue even if chunk fails
+            }
+          }
+        }
+
+        // Clear attachment
+        attachedFile = null;
+        attachedFileName = null;
+
+        // Last chunk - get full response
+        try {
+          let response = '';
+          chatContent += '{cyan-fg}AI: ';
+          chatBox.setContent(chatContent + '...{/cyan-fg}');
+          screen.render();
+
+          const apiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
+          apiMessages.push({ role: 'system', content: 'CRITICAL RULE: You MUST NOT use any emojis, emoticons, icons, or special unicode symbols (like 😀, ✨, 🎉, etc.) in your responses. Use only plain ASCII text. Khong duoc su dung emoji.' });
+
+          if (conversation.systemPrompt) {
+            apiMessages.push({ role: 'system', content: conversation.systemPrompt });
+          }
+
+          // Add all conversation messages including chunks
+          apiMessages.push(...conversation.messages.map(m => ({
+            role: m.role,
+            content: m.content
+          })));
+
+          for await (const chunk of openRouterAPI.chatStream(apiMessages, model)) {
+            response += chunk;
+            chatBox.setContent(chatContent + response + '{/cyan-fg}');
+            chatBox.setScrollPerc(100);
+            screen.render();
+          }
+
+          if (!response) {
+            response = '(No response from API)';
+          }
+
+          chatContent += response + `{/cyan-fg}\n\n`;
+
+          conversation.messages.push({
+            role: 'assistant',
+            content: response,
+            timestamp: Date.now()
+          });
+
+          conversation.updatedAt = Date.now();
+          configStore.saveConversation(conversation);
+        } catch (error: any) {
+          chatContent += `{red-fg}AI: Error - ${error.message}{/red-fg}\n\n`;
+        }
+
+        chatBox.setContent(chatContent);
+        updateStatus();
+        screen.render();
+        return;
+      }
+    }
+
+    // Normal message (or small attached file)
     let fullMessage = message;
     if (attachedFile && attachedFileName) {
       const ext = attachedFileName.split('.').pop() || 'txt';
@@ -818,7 +942,7 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
       const apiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }> = [];
 
       // Add base system prompt to avoid emojis
-      apiMessages.push({ role: 'system', content: 'Do not use emojis, icons, or special unicode symbols in your responses. Use plain text only.' });
+      apiMessages.push({ role: 'system', content: 'CRITICAL RULE: You MUST NOT use any emojis, emoticons, icons, or special unicode symbols (like 😀, ✨, 🎉, etc.) in your responses. Use only plain ASCII text. Khong duoc su dung emoji.' });
 
       // Add user's custom system prompt if set
       if (conversation.systemPrompt) {
@@ -831,16 +955,28 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
         if (historyContext) {
           apiMessages.push({
             role: 'system',
-            content: `Previous conversation context (remember this information):\n${historyContext}`
+            content: `Previous conversation context:\n${historyContext}`
           });
         }
       }
 
-      // Add conversation messages
-      apiMessages.push(...conversation.messages.map(m => ({
-        role: m.role,
-        content: m.content
-      })));
+      // Add conversation messages with reminders in last user message
+      const messagesWithReminder = conversation.messages.map((m, i) => {
+        if (m.role === 'user' && i === conversation.messages.length - 1) {
+          // Anti-emoji is ALWAYS present
+          let reminder = '\n\n[Do not use emojis in your response]';
+          // System prompt is OPTIONAL - add separately if exists
+          if (conversation.systemPrompt) {
+            reminder += `\n[System instructions: ${conversation.systemPrompt}]`;
+          }
+          return {
+            role: m.role,
+            content: m.content + reminder
+          };
+        }
+        return { role: m.role, content: m.content };
+      });
+      apiMessages.push(...messagesWithReminder);
 
       // Show message count in status for debugging
       statusBar.setContent(`Sending ${apiMessages.length} messages to API...`);
@@ -925,6 +1061,7 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
   // Key bindings
   let workspaceOpen = false; // Moved here so all handlers can access
+  let overlayOpen = false; // Track when any overlay (model selector, etc) is open
   let wsFocused = true; // true = workspace focused, false = chat/editor focused
   let loadFileInEditor: ((filePath: string, fileName: string) => void) | null = null;
   let activeWorkspaceBox: any = null; // Reference for cleanup
@@ -942,14 +1079,14 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
   // Scroll with j/k and arrow keys in normal mode
   screen.key(['j', 'down'], () => {
-    if (mode === 'normal' && !workspaceOpen) {
+    if (mode === 'normal' && !workspaceOpen && !overlayOpen) {
       chatBox.scroll(1);
       screen.render();
     }
   });
 
   screen.key(['k', 'up'], () => {
-    if (mode === 'normal' && !workspaceOpen) {
+    if (mode === 'normal' && !workspaceOpen && !overlayOpen) {
       chatBox.scroll(-1);
       screen.render();
     }
@@ -1012,8 +1149,10 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
   screen.key(['m'], async () => {
     if (mode === 'normal' && !editorOpen) {
+      overlayOpen = true; // Prevent chat scroll while model selector is open
       const previousModel = model;
       model = await selectModelSync(screen, chatBox, models, model);
+      overlayOpen = false;
 
       if (model !== previousModel) {
         conversation.model = model;
@@ -1343,7 +1482,8 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
             try {
               attachedFile = fs.readFileSync(filePath, 'utf-8');
               attachedFileName = name;
-              chatContent += `{yellow-fg}[Attached: ${name}]{/yellow-fg}\n\n`;
+              const sizeInfo = attachedFile.length > 4000 ? ` (${Math.ceil(attachedFile.length / 4000)} chunks)` : ` (${attachedFile.length} chars)`;
+              chatContent += `{yellow-fg}[Attached: ${name}${sizeInfo}]{/yellow-fg}\n\n`;
               chatBox.setContent(chatContent);
               chatBox.setScrollPerc(100);
             } catch (err) {
@@ -1672,7 +1812,9 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
 
   // Set system prompt
   screen.key(['s'], () => {
-    if (mode === 'normal' && !editorOpen) {
+    if (mode === 'normal' && !editorOpen && !overlayOpen) {
+      overlayOpen = true;
+
       const promptBox = blessed.textbox({
         top: 'center',
         left: 'center',
@@ -1680,27 +1822,36 @@ export async function vimChatCommand(options: { model?: string, conversation?: C
         height: 3,
         label: ' System Prompt (Enter=save, ESC=cancel) ',
         border: { type: 'line' },
-        style: { border: { fg: 'yellow' }, bg: 'black' },
+        style: { border: { fg: 'yellow' }, bg: 'black', fg: 'white' },
         inputOnFocus: true
       });
 
       screen.append(promptBox);
+
+      // Pre-fill with current system prompt (must be after append)
+      if (conversation.systemPrompt) {
+        promptBox.setValue(conversation.systemPrompt);
+      }
+
       promptBox.focus();
+      promptBox.readInput();
       screen.render();
 
-      promptBox.key(['enter'], () => {
-        conversation.systemPrompt = promptBox.getValue();
-        configStore.setDefaultSystemPrompt(conversation.systemPrompt || '');
+      promptBox.on('submit', (value: string) => {
+        conversation.systemPrompt = value || '';
+        configStore.setDefaultSystemPrompt(conversation.systemPrompt);
         screen.remove(promptBox);
-        chatContent += `[System prompt updated]\n\n`;
+        chatContent += `[System prompt: ${value || '(cleared)'}]\n\n`;
         chatBox.setContent(chatContent);
         chatBox.focus();
+        overlayOpen = false;
         screen.render();
       });
 
-      promptBox.key(['escape'], () => {
+      promptBox.on('cancel', () => {
         screen.remove(promptBox);
         chatBox.focus();
+        overlayOpen = false;
         screen.render();
       });
     }

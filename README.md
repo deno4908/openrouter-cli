@@ -79,6 +79,22 @@ npm run build
 npm link
 ```
 
+### 📱 Termux (Android)
+```bash
+# Install Node.js in Termux
+pkg update && pkg install nodejs
+
+# Install the CLI
+npm install -g deno-openrouter-cli
+
+# Run with Termux mode (keeps keyboard open)
+openrouter chat --termux
+# or
+or chat -t
+```
+
+**Note**: Use `--termux` or `-t` flag to enable mobile-friendly mode that keeps the virtual keyboard open.
+
 ---
 
 ## 🚀 Quick Start
